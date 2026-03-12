@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Good Videos</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js"></script>
+</head>
+<body class="min-h-screen bg-neutral text-neutral-content">
+  <main class="mx-auto flex min-h-screen w-full max-w-6xl items-center justify-center p-4">
+    <div class="grid w-full gap-6 lg:grid-cols-[minmax(0,420px)_260px] lg:items-center">
+      {{ template "video.html" .Video }}
+
+      <aside class="card border border-base-300 bg-base-200 shadow-xl">
+        <div class="card-body gap-4">
+          <div>
+            <p class="text-sm uppercase tracking-[0.3em] text-base-content/60">Good videos</p>
+            <h1 class="mt-2 text-3xl font-semibold">Simple short video feed</h1>
+          </div>
+
+          <p class="text-base-content/70">
+            This page reads video links from Postgres and swaps the player with HTMX.
+          </p>
+
+          <div class="divider my-0"></div>
+
+          <ul class="space-y-3 text-sm text-base-content/70">
+            <li>Use Prev and Next to move through videos.</li>
+            <li>When one video ends, the next one loads.</li>
+            <li>Store Cloudflare CDN or R2 public links in the <code>videos</code> table.</li>
+          </ul>
+
+          <div class="rounded-box bg-base-300/60 p-3 text-xs text-base-content/70">
+            DigitalOcean ready: set <code>PORT</code> and your Postgres env values or <code>DATABASE_URL</code>.
+          </div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    function wirePlayer() {
+      const shell = document.getElementById("video-shell");
+      if (!shell) return;
+
+      const video = shell.querySelector("[data-player]");
+      const nextButton = shell.querySelector("[data-next]");
+      const prevButton = shell.querySelector("[data-prev]");
+
+      if (!video) return;
+
+      video.play().catch(() => {});
+
+      video.onended = () => {
+        if (nextButton) nextButton.click();
+      };
+
+      document.onkeydown = (event) => {
+        if (event.key === "ArrowDown" && nextButton) nextButton.click();
+        if (event.key === "ArrowUp" && prevButton) prevButton.click();
+      };
+    }
+
+    document.addEventListener("DOMContentLoaded", wirePlayer);
+    document.body.addEventListener("htmx:afterSwap", wirePlayer);
+  </script>
+</body>
+</html>

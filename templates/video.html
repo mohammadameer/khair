@@ -1,0 +1,59 @@
+<section id="video-shell" class="flex w-full justify-center">
+  {{ if .Empty }}
+    <div class="card w-full max-w-sm border border-base-300 bg-base-200 shadow-xl">
+      <div class="card-body items-start text-left">
+        <h2 class="card-title">No videos found</h2>
+        <p class="text-base-content/70">{{ .Message }}</p>
+        <div class="mockup-code w-full text-xs">
+          <pre><code>INSERT INTO videos (video_url) VALUES</code></pre>
+          <pre><code>('https://cdn.your-domain.com/video-1.mp4');</code></pre>
+        </div>
+      </div>
+    </div>
+  {{ else }}
+    <div class="flex w-full max-w-sm flex-col gap-4">
+      <div class="mockup-phone border-primary shadow-xl">
+        <div class="camera"></div>
+        <div class="display bg-black">
+          <div class="artboard artboard-demo phone-1 bg-black">
+            <video
+              class="h-full w-full object-cover"
+              src="{{ .VideoURL }}"
+              controls
+              autoplay
+              playsinline
+              preload="metadata"
+              data-player
+            >
+              Your browser does not support video.
+            </video>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-3">
+        <button
+          class="btn btn-outline flex-1"
+          hx-get="/video?current_id={{ .ID }}&direction=prev"
+          hx-target="#video-shell"
+          hx-swap="outerHTML"
+          data-prev
+        >
+          Prev
+        </button>
+
+        <span class="badge badge-outline px-4 py-3">Video {{ .ID }}</span>
+
+        <button
+          class="btn btn-primary flex-1"
+          hx-get="/video?current_id={{ .ID }}&direction=next"
+          hx-target="#video-shell"
+          hx-swap="outerHTML"
+          data-next
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  {{ end }}
+</section>
