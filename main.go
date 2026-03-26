@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -13,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 )
 
 //go:embed templates/*.html db/schema.sql
@@ -40,6 +43,32 @@ type videoView struct {
 
 type pageData struct {
 	Video videoView
+}
+
+type user struct {
+	ID        int64     `json:"id"`
+	Username  string    `json:"username"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type authRequest struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type authResponse struct {
+	Message string `json:"message"`
+	Token   string `json:"token,omitempty"`
+	User    *user  `json:"user,omitempty"`
+}
+
+type claims struct {
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	jwt.RegisteredClaims
 }
 
 func main() {
@@ -77,6 +106,10 @@ func main() {
 	mux.HandleFunc("/", server.handleHome)
 	mux.HandleFunc("/video", server.handleVideo)
 	mux.HandleFunc("/healthz", handleHealth)
+	mux.HandleFunc("POST /api/auth/register", server.handleRegister)
+	mux.HandleFunc("POST /api/auth/login", server.handleLogin)
+	mux.HandleFunc("POST /api/auth/logout", server.handleLogout)
+	mux.Handle("GET /api/auth/me", requireAuth(server.handleMe))
 
 	httpServer := &http.Server{
 		Addr:         ":" + env("PORT", "8080"),
@@ -410,4 +443,242 @@ func logRequests(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(startedAt).Round(time.Millisecond))
 	})
+}
+
+// Authentication handlers
+func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondJSON(w, http.StatusMethodNotAllowed, authResponse{Message: "method not allowed"})
+		return
+	}
+
+	var req authRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondJSON(w, http.StatusBadRequest, authResponse{Message: "invalid request body"})
+		return
+	}
+
+	if req.Username == "" || req.Email == "" || req.Password == "" {
+		respondJSON(w, http.StatusBadRequest, authResponse{Message: "username, email, and password are required"})
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, authResponse{Message: "failed to hash password"})
+		return
+	}
+
+	var userID int64
+	err = a.pool.QueryRow(
+		r.Context(),
+		`INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id`,
+		req.Username,
+		req.Email,
+		string(hashedPassword),
+	).Scan(&userID)
+
+	if err != nil {
+		if strings.Contains(err.Error(), "unique constraint") {
+			respondJSON(w, http.StatusConflict, authResponse{Message: "username or email already exists"})
+			return
+		}
+		respondJSON(w, http.StatusInternalServerError, authResponse{Message: "failed to create user"})
+		return
+	}
+
+	usr := &user{
+		ID:        userID,
+		Username:  req.Username,
+		Email:     req.Email,
+		CreatedAt: time.Now(),
+	}
+
+	token, err := generateToken(userID, req.Username, req.Email)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, authResponse{Message: "failed to generate token"})
+		return
+	}
+
+	respondJSON(w, http.StatusCreated, authResponse{
+		Message: "user registered successfully",
+		Token:   token,
+		User:    usr,
+	})
+}
+
+func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondJSON(w, http.StatusMethodNotAllowed, authResponse{Message: "method not allowed"})
+		return
+	}
+
+	var req authRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondJSON(w, http.StatusBadRequest, authResponse{Message: "invalid request body"})
+		return
+	}
+
+	if req.Email == "" || req.Password == "" {
+		respondJSON(w, http.StatusBadRequest, authResponse{Message: "email and password are required"})
+		return
+	}
+
+	var (
+		userID       int64
+		username     string
+		storedHash   string
+	)
+
+	err := a.pool.QueryRow(
+		r.Context(),
+		`SELECT id, username, password FROM users WHERE email = $1`,
+		req.Email,
+	).Scan(&userID, &username, &storedHash)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			respondJSON(w, http.StatusUnauthorized, authResponse{Message: "invalid email or password"})
+			return
+		}
+		respondJSON(w, http.StatusInternalServerError, authResponse{Message: "failed to authenticate"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(req.Password)); err != nil {
+		respondJSON(w, http.StatusUnauthorized, authResponse{Message: "invalid email or password"})
+		return
+	}
+
+	usr := &user{
+		ID:        userID,
+		Username:  username,
+		Email:     req.Email,
+		CreatedAt: time.Now(),
+	}
+
+	token, err := generateToken(userID, username, req.Email)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, authResponse{Message: "failed to generate token"})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, authResponse{
+		Message: "logged in successfully",
+		Token:   token,
+		User:    usr,
+	})
+}
+
+func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondJSON(w, http.StatusMethodNotAllowed, authResponse{Message: "method not allowed"})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, authResponse{Message: "logged out successfully"})
+}
+
+func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondJSON(w, http.StatusMethodNotAllowed, authResponse{Message: "method not allowed"})
+		return
+	}
+
+	c, ok := r.Context().Value("claims").(*claims)
+	if !ok {
+		respondJSON(w, http.StatusUnauthorized, authResponse{Message: "invalid token"})
+		return
+	}
+
+	var createdAt time.Time
+	err := a.pool.QueryRow(
+		r.Context(),
+		`SELECT created_at FROM users WHERE id = $1`,
+		c.UserID,
+	).Scan(&createdAt)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			respondJSON(w, http.StatusNotFound, authResponse{Message: "user not found"})
+			return
+		}
+		respondJSON(w, http.StatusInternalServerError, authResponse{Message: "failed to fetch user"})
+		return
+	}
+
+	usr := &user{
+		ID:        c.UserID,
+		Username:  c.Username,
+		Email:     c.Email,
+		CreatedAt: createdAt,
+	}
+
+	respondJSON(w, http.StatusOK, authResponse{
+		Message: "user info retrieved successfully",
+		User:    usr,
+	})
+}
+
+// Authentication middleware
+func requireAuth(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			respondJSON(w, http.StatusUnauthorized, authResponse{Message: "missing authorization header"})
+			return
+		}
+
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			respondJSON(w, http.StatusUnauthorized, authResponse{Message: "invalid authorization header"})
+			return
+		}
+
+		tokenString := parts[1]
+		c := &claims{}
+
+		token, err := jwt.ParseWithClaims(tokenString, c, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return getJWTSecret(), nil
+		})
+
+		if err != nil || !token.Valid {
+			respondJSON(w, http.StatusUnauthorized, authResponse{Message: "invalid or expired token"})
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), "claims", c)
+		next(w, r.WithContext(ctx))
+	})
+}
+
+// JWT and password helpers
+func generateToken(userID int64, username string, email string) (string, error) {
+	now := time.Now()
+	c := claims{
+		UserID:   userID,
+		Username: username,
+		Email:    email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(24 * time.Hour)),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
+	return token.SignedString(getJWTSecret())
+}
+
+func getJWTSecret() []byte {
+	secret := env("JWT_SECRET", "dev-secret-key-not-for-production")
+	return []byte(secret)
+}
+
+func respondJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
 }
